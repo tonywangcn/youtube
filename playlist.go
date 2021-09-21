@@ -69,10 +69,14 @@ func getVideoType(uri string) (string, error) {
 }
 
 type Playlist struct {
-	ID     string
-	Title  string
-	Author string
-	Videos []*PlaylistEntry
+	ID          string
+	Title       string
+	Author      string
+	Description string
+	Link        string
+	Image       string
+	PubDate     time.Time
+	Videos      []*PlaylistEntry
 }
 
 type PlaylistEntry struct {
@@ -157,11 +161,16 @@ func (p *Playlist) UnmarshalJSON(b []byte) (err error) {
 	if p.Author == "" {
 		p.Author = p.Title
 	}
+
+	p.Description = j.GetPath("metadata", "channelMetadataRenderer", "description").MustString()
+	p.Image = j.GetPath("metadata", "channelMetadataRenderer", "avatar", "thumbnails").GetIndex(0).GetPath("url").MustString()
+
 	vJSON, err := j.GetPath("contents", "twoColumnBrowseResultsRenderer", "tabs").GetIndex(0).
 		GetPath("tabRenderer", "content", "sectionListRenderer", "contents").GetIndex(0).
 		GetPath("itemSectionRenderer", "contents").GetIndex(0).
 		GetPath("playlistVideoListRenderer", "contents").MarshalJSON()
 
+	fmt.Printf("playlist %+v", p)
 	var vids []*videosJSONExtractor
 	if err := json.Unmarshal(vJSON, &vids); err != nil {
 		return err
