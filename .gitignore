@@ -4,3 +4,4 @@ download_test
 /bin
 /dist
 *.out
+vendor

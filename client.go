@@ -147,11 +147,10 @@ func (c *Client) GetPlaylist(url string) (*Playlist, error) {
 // for these videos. Playlist entries cannot be downloaded, as they lack all the required metadata, but
 // can be used to enumerate all IDs, Authors, Titles, etc.
 func (c *Client) GetPlaylistContext(ctx context.Context, url string) (*Playlist, error) {
-	id, err := extractPlaylistID(url)
+	requestURL, err := getVideoType(url)
 	if err != nil {
-		return nil, fmt.Errorf("extractPlaylistID failed: %w", err)
+		return nil, err
 	}
-	requestURL := fmt.Sprintf(playlistFetchURL, id)
 	resp, err := c.httpGet(ctx, requestURL)
 	if err != nil {
 		return nil, err
@@ -161,7 +160,7 @@ func (c *Client) GetPlaylistContext(ctx context.Context, url string) (*Playlist,
 	if err != nil {
 		return nil, err
 	}
-	p := &Playlist{ID: id}
+	p := &Playlist{ID: url}
 	return p, json.Unmarshal(data, p)
 }
 
