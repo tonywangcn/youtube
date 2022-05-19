@@ -86,7 +86,7 @@ func getVideoType(uri string) (string, error) {
 	for video := range videoTypeMap {
 		re := MatchOneOf(uri, videoTypeMap[video].Pattern)
 		if re != nil && len(re) >= 3 && len(re[2]) > 0 {
-			return fmt.Sprintf(videoTypeMap[video].URI, re[2]), nil
+			return re[2], nil
 		}
 	}
 	return "", errors.New("failed to parse id from URL")
