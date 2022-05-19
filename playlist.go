@@ -1,30 +1,54 @@
 package youtube
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	sjson "github.com/bitly/go-simplejson"
-	"golang.org/x/net/html"
-)
-
-const (
-	playlistFetchURL string = "https://www.youtube.com/playlist?list=%s&hl=en"
-	// The following are used in tests but also for fetching test data
-	testPlaylistResponseDataFile = "./testdata/playlist_test_data.html"
-	testPlaylistID               = "PL59FEE129ADFF2B12"
 )
 
 var (
-	playlistIDRegex    = regexp.MustCompile("^[A-Za-z0-9_-]{18,42}$")
-	playlistInURLRegex = regexp.MustCompile("[&?]list=([A-Za-z0-9_-]{18,42})(&.*)?$")
+	playlistIDRegex    = regexp.MustCompile("^[A-Za-z0-9_-]{13,42}$")
+	playlistInURLRegex = regexp.MustCompile("[&?]list=([A-Za-z0-9_-]{13,42})(&.*)?$")
 )
+
+type Playlist struct {
+	ID          string
+	Title       string
+	Description string
+	Author      string
+	Link        string
+	Image       string
+	PubDate     time.Time
+	Videos      []*PlaylistEntry
+}
+
+type PlaylistEntry struct {
+	ID         string
+	Title      string
+	Author     string
+	Duration   time.Duration
+	Thumbnails Thumbnails
+}
+
+func extractPlaylistID(url string) (string, error) {
+	if playlistIDRegex.Match([]byte(url)) {
+		return url, nil
+	}
+
+	matches := playlistInURLRegex.FindStringSubmatch(url)
+
+	if matches != nil {
+		return matches[1], nil
+	}
+
+	return "", ErrInvalidPlaylist
+}
 
 type videoType struct {
 	URI     string
@@ -68,66 +92,10 @@ func getVideoType(uri string) (string, error) {
 	return "", errors.New("failed to parse id from URL")
 }
 
-type Playlist struct {
-	ID          string
-	Title       string
-	Author      string
-	Description string
-	Link        string
-	Image       string
-	PubDate     time.Time
-	Videos      []*PlaylistEntry
-}
-
-type PlaylistEntry struct {
-	ID       string
-	Title    string
-	Author   string
-	Duration time.Duration
-}
-
-func extractPlaylistID(url string) (string, error) {
-	if playlistIDRegex.Match([]byte(url)) {
-		return url, nil
-	}
-
-	matches := playlistInURLRegex.FindStringSubmatch(url)
-
-	if matches != nil {
-		return matches[1], nil
-	}
-
-	return "", ErrInvalidPlaylist
-}
-
-func extractPlaylistJSON(r io.Reader) ([]byte, error) {
-	const prefix = "var ytInitialData ="
-
-	doc, err := html.Parse(r)
-	if err != nil {
-		return nil, err
-	}
-	var data []byte
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "script" && n.FirstChild != nil {
-			script := n.FirstChild.Data
-			if strings.HasPrefix(script, prefix) {
-				script = strings.TrimPrefix(script, prefix)
-				data = []byte(strings.Trim(script, ";"))
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-	f(doc)
-	return data, nil
-}
-
 // structs for playlist extraction
 
 // Title: metadata.playlistMetadataRenderer.title | sidebar.playlistSidebarRenderer.items[0].playlistSidebarPrimaryInfoRenderer.title.runs[0].text
+// Description: metadata.playlistMetadataRenderer.description
 // Author: sidebar.playlistSidebarRenderer.items[1].playlistSidebarSecondaryInfoRenderer.videoOwner.videoOwnerRenderer.title.runs[0].text
 
 // Videos: contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents
@@ -135,34 +103,35 @@ func extractPlaylistJSON(r io.Reader) ([]byte, error) {
 // Title: title.runs[0].text
 // Author: .shortBylineText.runs[0].text
 // Duration: .lengthSeconds
+// Thumbnails .thumbnails
 
 // TODO?: Author thumbnails: sidebar.playlistSidebarRenderer.items[0].playlistSidebarPrimaryInfoRenderer.thumbnailRenderer.playlistVideoThumbnailRenderer.thumbnail.thumbnails
-// TODO? Video thumbnails: .thumbnail.thumbnails
-
-func (p *Playlist) UnmarshalJSON(b []byte) (err error) {
+func (p *Playlist) parsePlaylistInfo(ctx context.Context, client *Client, body []byte) (err error) {
 	var j *sjson.Json
-	j, err = sjson.NewJson(b)
+	j, err = sjson.NewJson(body)
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("JSON parsing error: %v", r)
 		}
 	}()
-	p.Title = j.GetPath("metadata", "playlistMetadataRenderer", "title").MustString()
-	if p.Title == "" {
-		p.Title = j.GetPath("metadata", "channelMetadataRenderer", "title").MustString()
+
+	renderer := j.GetPath("alerts").GetIndex(0).GetPath("alertRenderer")
+	if renderer != nil && renderer.GetPath("type").MustString() == "ERROR" {
+		message := renderer.GetPath("text", "runs").GetIndex(0).GetPath("text").MustString()
+
+		return ErrPlaylistStatus{Reason: message}
 	}
 
+	p.Title = j.GetPath("metadata", "playlistMetadataRenderer", "title").MustString()
+	p.Description = j.GetPath("metadata", "playlistMetadataRenderer", "description").MustString()
 	p.Author = j.GetPath("sidebar", "playlistSidebarRenderer", "items").GetIndex(1).
 		GetPath("playlistSidebarSecondaryInfoRenderer", "videoOwner", "videoOwnerRenderer", "title", "runs").
 		GetIndex(0).Get("text").MustString()
-	if p.Author == "" {
-		p.Author = p.Title
-	}
 
-	p.Description = j.GetPath("metadata", "channelMetadataRenderer", "description").MustString()
 	p.Image = j.GetPath("metadata", "channelMetadataRenderer", "avatar", "thumbnails").GetIndex(0).GetPath("url").MustString()
 
 	vJSON, err := j.GetPath("contents", "twoColumnBrowseResultsRenderer", "tabs").GetIndex(0).
@@ -170,85 +139,100 @@ func (p *Playlist) UnmarshalJSON(b []byte) (err error) {
 		GetPath("itemSectionRenderer", "contents").GetIndex(0).
 		GetPath("playlistVideoListRenderer", "contents").MarshalJSON()
 
-	fmt.Printf("playlist %+v", p)
-	var vids []*videosJSONExtractor
-	if err := json.Unmarshal(vJSON, &vids); err != nil {
+	entries, continuation, err := extractPlaylistEntries(vJSON)
+	if err != nil {
 		return err
 	}
-	if len(vids) == 0 {
-		vJSON, err = j.GetPath("contents", "twoColumnBrowseResultsRenderer", "tabs").GetIndex(1).
-			GetPath("tabRenderer", "content", "sectionListRenderer", "contents").GetIndex(0).
-			GetPath("itemSectionRenderer", "contents").GetIndex(0).
-			GetPath("gridRenderer", "items").MarshalJSON()
-		if err := json.Unmarshal(vJSON, &vids); err != nil {
-			fmt.Printf("err %v", err)
+
+	p.Videos = entries
+
+	for continuation != "" {
+		data := prepareInnertubePlaylistData(continuation, true, webClient)
+
+		body, err := client.httpPostBodyBytes(ctx, "https://www.youtube.com/youtubei/v1/browse?key="+webClient.key, data)
+		if err != nil {
 			return err
 		}
-	}
-	fmt.Println("vids ", vids)
-	p.Videos = make([]*PlaylistEntry, 0, len(vids))
-	for _, v := range vids {
 
-		if v.Renderer != nil || v.ChannelRenderer != nil {
-			fmt.Println("PlaylistEntry ", v.PlaylistEntry())
-			p.Videos = append(p.Videos, v.PlaylistEntry())
+		j, err := sjson.NewJson(body)
+		if err != nil {
+			return err
 		}
 
+		vJSON, err := j.GetPath("onResponseReceivedActions").GetIndex(0).
+			GetPath("appendContinuationItemsAction", "continuationItems").MarshalJSON()
+
+		if err != nil {
+			return err
+		}
+
+		entries, token, err := extractPlaylistEntries(vJSON)
+		if err != nil {
+			return err
+		}
+
+		p.Videos, continuation = append(p.Videos, entries...), token
 	}
-	return nil
+
+	return err
+}
+
+func extractPlaylistEntries(data []byte) ([]*PlaylistEntry, string, error) {
+	var vids []*videosJSONExtractor
+
+	if err := json.Unmarshal(data, &vids); err != nil {
+		return nil, "", err
+	}
+
+	entries := make([]*PlaylistEntry, 0, len(vids))
+
+	var continuation string
+	for _, v := range vids {
+		if v.Renderer == nil {
+			if v.Continuation.Endpoint.Command.Token != "" {
+				continuation = v.Continuation.Endpoint.Command.Token
+			}
+
+			continue
+		}
+
+		entries = append(entries, v.PlaylistEntry())
+	}
+
+	return entries, continuation, nil
 }
 
 type videosJSONExtractor struct {
 	Renderer *struct {
-		ID       string   `json:"videoId"`
-		Title    withRuns `json:"title"`
-		Author   withRuns `json:"shortBylineText"`
-		Duration string   `json:"lengthSeconds"`
+		ID        string   `json:"videoId"`
+		Title     withRuns `json:"title"`
+		Author    withRuns `json:"shortBylineText"`
+		Duration  string   `json:"lengthSeconds"`
+		Thumbnail struct {
+			Thumbnails []Thumbnail `json:"thumbnails"`
+		} `json:"thumbnail"`
 	} `json:"playlistVideoRenderer"`
-	ChannelRenderer *struct {
-		ID                string   `json:"videoId"`
-		Title             withRuns `json:"title"`
-		Author            withRuns `json:"shortBylineText"`
-		ThumbnailOverlays []struct {
-			ThumbnailOverlayTimeStatusRenderer struct {
-				Text struct {
-					SimpleText string `json:"simpleText"`
-				} `json:"text"`
-			} `json:"thumbnailOverlayTimeStatusRenderer"`
-		} `json:"thumbnailOverlays"`
-	} `json:"gridVideoRenderer"`
+	Continuation struct {
+		Endpoint struct {
+			Command struct {
+				Token string `json:"token"`
+			} `json:"continuationCommand"`
+		} `json:"continuationEndpoint"`
+	} `json:"continuationItemRenderer"`
 }
 
 func (vje videosJSONExtractor) PlaylistEntry() *PlaylistEntry {
-	if vje.Renderer != nil {
-		ds, err := strconv.Atoi(vje.Renderer.Duration)
-		if err != nil {
-			panic("invalid video duration: " + vje.Renderer.Duration)
-		}
-		return &PlaylistEntry{
-			ID:       vje.Renderer.ID,
-			Title:    vje.Renderer.Title.String(),
-			Author:   vje.Renderer.Author.String(),
-			Duration: time.Second * time.Duration(ds),
-		}
-	} else {
-		timeStr := vje.ChannelRenderer.ThumbnailOverlays[0].ThumbnailOverlayTimeStatusRenderer.Text.SimpleText
-		if strings.Count(timeStr, ":") == 1 {
-			timeStr = "0:" + timeStr
-		}
-		ds, err := time.Parse("3:4:5", timeStr)
-		if err != nil {
-			fmt.Print("invalid video duration: " + timeStr)
-		}
-		fmt.Println("ds ", ds, "time ", time.Time{})
-		return &PlaylistEntry{
-			ID:       vje.ChannelRenderer.ID,
-			Title:    vje.ChannelRenderer.Title.String(),
-			Author:   vje.ChannelRenderer.Author.String(),
-			Duration: ds.AddDate(1, 0, 0).Sub(time.Time{}),
-		}
+	ds, err := strconv.Atoi(vje.Renderer.Duration)
+	if err != nil {
+		panic("invalid video duration: " + vje.Renderer.Duration)
 	}
-
+	return &PlaylistEntry{
+		ID:         vje.Renderer.ID,
+		Title:      vje.Renderer.Title.String(),
+		Author:     vje.Renderer.Author.String(),
+		Duration:   time.Second * time.Duration(ds),
+		Thumbnails: vje.Renderer.Thumbnail.Thumbnails,
+	}
 }
 
 type withRuns struct {
