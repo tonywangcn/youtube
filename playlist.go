@@ -76,6 +76,7 @@ type Playlist struct {
 	Link        string
 	Image       string
 	PubDate     time.Time
+	ChannelId   string
 	Videos      []*PlaylistEntry
 }
 
@@ -165,6 +166,7 @@ func (p *Playlist) UnmarshalJSON(b []byte) (err error) {
 	p.Description = j.GetPath("metadata", "channelMetadataRenderer", "description").MustString()
 	p.Image = j.GetPath("metadata", "channelMetadataRenderer", "avatar", "thumbnails").GetIndex(0).GetPath("url").MustString()
 
+	p.ChannelId = j.GetPath("metadata", "channelMetadataRenderer", "externalId").MustString()
 	vJSON, err := j.GetPath("contents", "twoColumnBrowseResultsRenderer", "tabs").GetIndex(0).
 		GetPath("tabRenderer", "content", "sectionListRenderer", "contents").GetIndex(0).
 		GetPath("itemSectionRenderer", "contents").GetIndex(0).
